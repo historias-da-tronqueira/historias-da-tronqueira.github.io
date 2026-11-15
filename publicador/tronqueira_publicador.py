@@ -7,7 +7,8 @@ Uso interno (um usuário: o dono do canal). Fluxo:
      status.privacyStatus=private + publishAt (agendamento), selfDeclaredMadeForKids=false e
      containsSyntheticMedia=true (narração e imagens geradas por IA);
   3. thumbnails.set com a miniatura do episódio;
-  4. captions.insert com a legenda .srt em pt-BR.
+  4. captions.insert com a legenda .srt em pt-BR;
+  5. confere status.containsSyntheticMedia e reaplica com videos.update se não tiver ficado gravado.
 
 Credenciais em variáveis de ambiente: YT_CLIENT_ID, YT_CLIENT_SECRET, YT_REFRESH_TOKEN.
 Uso: python3 tronqueira_publicador.py PASTA_DO_EPISODIO [2026-12-04T22:00:00Z]
@@ -117,6 +118,25 @@ def enviar_legenda(tk: str, video_id: str, srt, http=None) -> None:
     r.raise_for_status()
 
 
+def garantir_sintetico(tk: str, video_id: str, corpo: dict, http=None) -> bool:
+    """Confere se o YouTube guardou containsSyntheticMedia; se não voltar no videos.list, reaplica com
+    videos.update (status completo, porque o update substitui a parte inteira). Devolve o que ficou gravado."""
+    import requests
+    http = http or requests
+    def ler():
+        r = http.get(f'{API}/videos', params={'part': 'status', 'id': video_id},
+                     headers={'Authorization': f'Bearer {tk}'}, timeout=60)
+        r.raise_for_status()
+        return ((r.json().get('items') or [{}])[0].get('status') or {})
+    if ler().get('containsSyntheticMedia') is True:
+        return True
+    r = http.put(f'{API}/videos', params={'part': 'status'}, timeout=60,
+                 headers={'Authorization': f'Bearer {tk}', 'Content-Type': 'application/json'},
+                 data=json.dumps({'id': video_id, 'status': corpo['status']}))
+    r.raise_for_status()
+    return (r.json().get('status') or {}).get('containsSyntheticMedia') is True or ler().get('containsSyntheticMedia') is True
+
+
 def publicar_episodio(pasta, publicar_em: str | None = None, tk: str | None = None, http=None) -> dict:
     """Sobe o vídeo longo de uma pasta de episódio (metadados.json, video_1080p.mp4, thumbnail_1.jpg,
     legendas.srt). Recusa enquanto o projeto não passou na auditoria: antes dela o YouTube trava o vídeo
@@ -127,11 +147,13 @@ def publicar_episodio(pasta, publicar_em: str | None = None, tk: str | None = No
     pasta = Path(pasta)
     meta = json.loads((pasta / 'metadados.json').read_text(encoding='utf-8'))
     tk = tk or token()
-    vid = enviar_video(tk, pasta / 'video_1080p.mp4', corpo_do_video(meta, publicar_em), http)
+    corpo = corpo_do_video(meta, publicar_em)
+    vid = enviar_video(tk, pasta / 'video_1080p.mp4', corpo, http)
     enviar_miniatura(tk, vid, pasta / meta['thumbnails'][0], http)
     if (pasta / meta.get('legenda', 'legendas.srt')).exists():
         enviar_legenda(tk, vid, pasta / meta.get('legenda', 'legendas.srt'), http)
-    return {'video_id': vid, 'url': f'https://youtu.be/{vid}', 'publicar_em': publicar_em}
+    sintetico = garantir_sintetico(tk, vid, corpo, http)
+    return {'video_id': vid, 'url': f'https://youtu.be/{vid}', 'publicar_em': publicar_em, 'sintetico': sintetico}
 
 
 if __name__ == '__main__':
